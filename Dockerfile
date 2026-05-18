@@ -1,37 +1,39 @@
-# Use the official Rocky Linux 9 base image
-FROM rockylinux:9
+# --- STAGE 0: Build from Source using secure Go 1.26 ---
+FROM docker.io/library/golang:1.26-bookworm AS go-builder
 
-# Install core dependencies using DNF
-# 'tar' is mandatory to extract the Helm binary
+# Pin the correct, existing upstream versions for source compilation
+ARG KIND_VERSION=v0.31.0
+ARG HELM_VERSION=v3.20.2
+
+# Compile the KinD CLI directly from its source code using Go 1.26
+RUN GOPROXY=https://proxy.golang.org,direct \
+    go install sigs.k8s.io/kind@${KIND_VERSION}
+
+# Compile Helm directly from its source code using Go 1.26
+RUN GOPROXY=https://proxy.golang.org,direct \
+    go install helm.sh/helm/v3/cmd/helm@${HELM_VERSION}
+
+
+# --- STAGE 1: Final Secure Rocky Linux Runtime ---
+FROM docker.io/rockylinux/rockylinux:9.7
+
+# Ensure packages are installed properly, not just updated
 RUN dnf update -y curl tar && dnf install -y \
-     \
     git \
     && dnf clean all
 
-# Explicitly pin stable versions
+# Grab the latest patched kubectl binary (precompiled from Kubernetes)
 ARG KUBECTL_VERSION=v1.36.1
-ARG KIND_VERSION=v0.31.0
-ARG HELM_VERSION=v3.14.2
-
-# 1. Download and install kubectl
 RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
     && chmod +x kubectl \
     && mv kubectl /usr/local/bin/
 
-# 2. Download and install KinD
-RUN curl -Lo kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64" \
-    && chmod +x kind \
-    && mv kind /usr/local/bin/
+# COPY the secure binaries you custom-built using Go 1.26 from Stage 0
+COPY --from=go-builder /go/bin/kind /usr/local/bin/kind
+COPY --from=go-builder /go/bin/helm /usr/local/bin/helm
 
-# 3. Download and install Helm
-RUN curl -fsSL -o helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
-    && tar -zxvf helm.tar.gz \
-    && mv linux-amd64/helm /usr/local/bin/helm \
-    && rm -rf helm.tar.gz linux-amd64
-
-# Sanity check to verify all Go binaries compile and run on the RHEL architecture
+# Sanity check to verify all binaries work on Rocky Linux
 RUN kubectl version --client && kind version && helm version --client
 
 WORKDIR /apps
-
 ENTRYPOINT ["/bin/bash"]
