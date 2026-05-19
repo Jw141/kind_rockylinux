@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y git
 ARG KIND_VERSION=v0.31.0
 ARG HELM_VERSION=v3.20.2
 ARG KUBECTL_VERSION=v1.36.1
+ARG KUBECONFORM_VERSION=v0.7.0
 
 # 1. Clone, inject gRPC replace shortcut, and build KinD using on-the-fly mod patching
 RUN git clone --depth 1 --branch ${KIND_VERSION} https://github.com/kubernetes-sigs/kind.git /build/kind && \
@@ -29,6 +30,11 @@ RUN git clone --depth 1 --branch ${KUBECTL_VERSION} https://github.com/kubernete
     go mod edit -replace google.golang.org/grpc=google.golang.org/grpc@v1.79.3 && \
     GOWORK=off go build -mod=mod -ldflags="-w -s" -o /go/bin/kubectl ./cmd/kubectl
 
+# 4. Clone and compile Kubeconform natively from source code (Fixed with ARG declaration above)
+RUN git clone --depth 1 --branch ${KUBECONFORM_VERSION} https://github.com/yannh/kubeconform.git /build/kubeconform && \
+    cd /build/kubeconform && \
+    go build -mod=mod -ldflags="-w -s" -o /go/bin/kubeconform ./cmd/kubeconform
+
 
 # --- STAGE 1: Hardened Final Image ---
 FROM docker.io/rockylinux/rockylinux:9.7
@@ -39,27 +45,44 @@ RUN dnf clean all && \
     dnf install -y epel-release && \
     dnf config-manager --set-enabled crb
 
-# 2. Install secondary diagnostic runtimes (Omit curl/tar to prevent duplicate install errors)
+# 2. Install diagnostic utilities and your runtime sandbox dependencies
 RUN dnf install -y --allowerasing \
+    podman \
+    curl \
+    tar \
+    gzip \
+    iproute \
+    iptables \
+    findutils \
+    coreutils \
+    unzip \
+    jq \
+    ca-certificates \
+    openssl \
+    bind-utils \
+    hostname \
+    which \
     shadow-utils \
     git \
     procps-ng \
     htop \
-    && dnf clean all
+    && dnf clean all \
+    && ln -s /usr/bin/podman /usr/local/bin/docker
 
 # 3. Copy the completely secure, source-compiled assets from Stage 0
 COPY --from=go-builder /go/bin/kubectl /usr/local/bin/kubectl
 COPY --from=go-builder /go/bin/kind /usr/local/bin/kind
 COPY --from=go-builder /go/bin/helm /usr/local/bin/helm
+COPY --from=go-builder /go/bin/kubeconform /usr/local/bin/kubeconform
 
 # 4. Sanity check to confirm operational compliance
-RUN kubectl version --client && kind version && helm version --client
+RUN kubectl version --client && kind version && helm version --client && kubeconform -v
 
 WORKDIR /apps
 
 # OCI Metadata tracking compliance
 LABEL org.opencontainers.image.title="Hardened Kubernetes Dev Toolbox" \
-      org.opencontainers.image.description="Rocky Linux 9.7 dev toolbox featuring custom source-compiled and dependency-patched variations of KinD, Helm, and Kubectl." \
+      org.opencontainers.image.description="Rocky Linux 9.7 dev toolbox featuring custom source-compiled and dependency-patched variations of KinD, Helm, Kubectl, and Kubeconform." \
       org.opencontainers.image.vendor="Radix Metasystems"
 
 ENTRYPOINT ["/bin/bash"]
